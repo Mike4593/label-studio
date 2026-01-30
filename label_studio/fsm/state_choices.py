@@ -14,15 +14,13 @@ Core state choice enums for Label Studio entities.
 These enums define the essential states for core Label Studio entities.
 """
 
-
+# TODO : update
 @register_state_choices('task')
 class TaskStateChoices(models.TextChoices):
     """
-    Core task states for basic Label Studio workflow.
-    Simplified states covering the essential task lifecycle:
-    - Creation and assignment
-    - Annotation work
-    - Completion
+    Extended task states with review pipeline support.
+    Workflow: CREATED → IN_PROGRESS → SUBMITTED → PENDING_REVIEW → FINALIZED
+    Alternative: PENDING_REVIEW → REJECTED → IN_PROGRESS (reassigned)
     """
 
     # Initial State
@@ -30,10 +28,12 @@ class TaskStateChoices(models.TextChoices):
 
     # Work States
     IN_PROGRESS = 'IN_PROGRESS', _('In Progress')
+    SUBMITTED = 'SUBMITTED', _('Submitted for Review')
+    PENDING_REVIEW = 'PENDING_REVIEW', _('Pending Review')
 
-    # Terminal State
-    COMPLETED = 'COMPLETED', _('Completed')
-
+    # Final States
+    FINALIZED = 'FINALIZED', _('Finalized')
+    REJECTED = 'REJECTED', _('Rejected')
 
 @register_state_choices('annotation')
 class AnnotationStateChoices(models.TextChoices):
