@@ -108,3 +108,79 @@ class TaskInProgressTransition(ModelChangeTransition):
             'cancelled_annotations': task.cancelled_annotations,
             'is_labeled': task.is_labeled,
         }
+
+
+##########
+# TODO new
+
+@register_state_transition('task', 'task_submitted', triggers_on_create=False, triggers_on_update=False)
+class TaskSubmittedTransition(ModelChangeTransition):
+    """Transition when annotator submits task for review"""
+    
+    def get_target_state(self, context: Optional[TransitionContext] = None) -> str:
+        return TaskStateChoices.SUBMITTED
+
+    def get_reason(self, context: TransitionContext) -> str:
+        return 'Task submitted for review by annotator'
+
+    def transition(self, context: TransitionContext) -> Dict[str, Any]:
+        task = context.entity
+        return {
+            'submitted_by': context.user.id if context.user else None,
+            'submitted_at': str(context.timestamp),
+        }
+
+
+@register_state_transition('task', 'task_pending_review', triggers_on_create=False, triggers_on_update=False)
+class TaskPendingReviewTransition(ModelChangeTransition):
+    """Transition when task enters review queue"""
+    
+    def get_target_state(self, context: Optional[TransitionContext] = None) -> str:
+        return TaskStateChoices.PENDING_REVIEW
+
+    def get_reason(self, context: TransitionContext) -> str:
+        return 'Task queued for reviewer action'
+
+    def transition(self, context: TransitionContext) -> Dict[str, Any]:
+        task = context.entity
+        return {
+            'review_started_at': str(context.timestamp),
+        }
+
+
+@register_state_transition('task', 'task_finalized', triggers_on_create=False, triggers_on_update=False)
+class TaskFinalizedTransition(ModelChangeTransition):
+    """Transition when reviewer accepts or modifies and finalizes"""
+    
+    def get_target_state(self, context: Optional[TransitionContext] = None) -> str:
+        return TaskStateChoices.FINALIZED
+
+    def get_reason(self, context: TransitionContext) -> str:
+        return 'Task finalized by reviewer'
+
+    def transition(self, context: TransitionContext) -> Dict[str, Any]:
+        task = context.entity
+        return {
+            'finalized_by': context.user.id if context.user else None,
+            'finalized_at': str(context.timestamp),
+            'review_action': context.metadata.get('action', 'accept') if hasattr(context, 'metadata') else 'accept',
+        }
+
+
+@register_state_transition('task', 'task_rejected', triggers_on_create=False, triggers_on_update=False)
+class TaskRejectedTransition(ModelChangeTransition):
+    """Transition when reviewer rejects the annotation"""
+    
+    def get_target_state(self, context: Optional[TransitionContext] = None) -> str:
+        return TaskStateChoices.REJECTED
+
+    def get_reason(self, context: TransitionContext) -> str:
+        return 'Task rejected by reviewer, awaiting reassignment'
+
+    def transition(self, context: TransitionContext) -> Dict[str, Any]:
+        task = context.entity
+        return {
+            'rejected_by': context.user.id if context.user else None,
+            'rejected_at': str(context.timestamp),
+            'rejection_reason': context.metadata.get('rejection_reason', '') if hasattr(context, 'metadata') else '',
+        }
