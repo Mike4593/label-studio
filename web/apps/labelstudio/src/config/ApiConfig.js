@@ -95,6 +95,11 @@ export const API_CONFIG = {
 
     // FSM
     fsmStateHistory: "GET:/fsm/entities/:entityType/:entityId/history",
+
+    // Project Members TODO new
+    projectMembers: "GET:/projects/:project_id/members",
+    projectMemberUpdate: "PATCH:/projects/:project_id/members/:member_id",
+    projectMemberDelete: "DELETE:/projects/:project_id/members/:member_id/delete",
   },
   alwaysExpectJSON: false,
 };
