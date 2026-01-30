@@ -34,6 +34,16 @@ _api_drafts_urlpatterns = [
 
 _api_predictions_urlpatterns = router.urls
 
+# TODO : new
+# Add to task API urlpatterns
+
+_api_review_urlpatterns = [
+    path('', api.TaskReviewListAPI.as_view(), name='review-list'),
+    path('<int:task_id>/', api.TaskReviewDetailAPI.as_view(), name='review-detail'),
+    path('<int:task_id>/accept/', api.TaskReviewAcceptAPI.as_view(), name='review-accept'),
+    path('<int:task_id>/modify/', api.TaskReviewModifyAPI.as_view(), name='review-modify'),
+    path('<int:task_id>/reject/', api.TaskReviewRejectAPI.as_view(), name='review-reject'),
+]
 
 urlpatterns = [
     path('api/tasks/', include((_api_urlpatterns, app_name), namespace='api')),
@@ -41,4 +51,7 @@ urlpatterns = [
     path('api/annotations/', include((_api_annotations_urlpatterns, app_name), namespace='api-annotations')),
     path('api/drafts/', include((_api_drafts_urlpatterns, app_name), namespace='api-drafts')),
     path('api/', include((_api_predictions_urlpatterns, app_name), namespace='api-predictions')),
+    # new
+    path('api/reviews/', include((_api_review_urlpatterns, app_name), namespace='api-reviews')),
 ]
+
