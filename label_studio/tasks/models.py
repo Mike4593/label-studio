@@ -1557,3 +1557,90 @@ def bulk_update_stats_project_tasks(tasks, project=None):
 
 Q_finished_annotations = Q(was_cancelled=False) & Q(result__isnull=False)
 Q_task_finished_annotations = Q(annotations__was_cancelled=False) & Q(annotations__result__isnull=False)
+
+# TDOD : review
+# Add new model for storing review pipeline metadata
+
+class TaskReview(models.Model):
+    """Review pipeline metadata and history"""
+    
+    class ReviewStatus(models.TextChoices):
+        """Review status choices"""
+        PENDING = 'PENDING', _('Pending Review')
+        ACCEPTED = 'ACCEPTED', _('Accepted')
+        REJECTED = 'REJECTED', _('Rejected')
+        MODIFIED_AND_ACCEPTED = 'MODIFIED_AND_ACCEPTED', _('Modified and Accepted')
+
+    task = models.OneToOneField(
+        Task,
+        on_delete=models.CASCADE,
+        related_name='review',
+        help_text='Task being reviewed'
+    )
+    
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='assigned_reviews',
+        help_text='Reviewer assigned to this task'
+    )
+    
+    original_annotator = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='annotator_tasks_under_review',
+        help_text='Original annotator who submitted the task'
+    )
+    
+    review_status = models.CharField(
+        max_length=25,
+        choices=ReviewStatus.choices,
+        default=ReviewStatus.PENDING,
+        help_text='Current review status'
+    )
+    
+    submitted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='When task was submitted for review'
+    )
+    
+    reviewed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='When reviewer took action'
+    )
+    
+    rejection_reason = models.TextField(
+        blank=True,
+        default='',
+        help_text='Reason for rejection if applicable'
+    )
+    
+    review_notes = models.TextField(
+        blank=True,
+        default='',
+        help_text='Reviewer notes'
+    )
+    
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+    
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    class Meta:
+        verbose_name = 'Task Review'
+        verbose_name_plural = 'Task Reviews'
+        indexes = [
+            models.Index(fields=['review_status']),
+            models.Index(fields=['assigned_to', 'review_status']),
+            models.Index(fields=['task', 'review_status']),
+        ]
+
+    def __str__(self):
+        return f"Review of Task {self.task.id} - {self.review_status}"
