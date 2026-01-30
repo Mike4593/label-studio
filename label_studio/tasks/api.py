@@ -19,11 +19,11 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, OpenApiResponse, extend_schema
 from projects.functions.stream_history import fill_history_annotation
 from projects.models import Project
-from rest_framework import generics, viewsets
+from rest_framework import generics, viewsets, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
-from tasks.models import Annotation, AnnotationDraft, Prediction, Task
+from tasks.models import Annotation, AnnotationDraft, Prediction, Task, TaskReview
 from tasks.openapi_schema import (
     annotation_request_schema,
     annotation_response_example,
@@ -39,6 +39,10 @@ from tasks.serializers import (
     PredictionSerializer,
     TaskSerializer,
     TaskSimpleSerializer,
+    TaskReviewSerializer,
+    ReviewAcceptSerializer,
+    ReviewModifySerializer,
+    ReviewRejectSerializer,
 )
 from webhooks.models import WebhookAction
 from webhooks.utils import (
@@ -46,6 +50,14 @@ from webhooks.utils import (
     api_webhook_for_delete,
     emit_webhooks_for_instance,
 )
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
+from django.utils.timezone import now
+from projects.models import ProjectMember
+from fsm.state_manager import get_state_manager
+from fsm.transitions import TransitionContext
+
+StateManager = get_state_manager()
 
 logger = logging.getLogger(__name__)
 
@@ -907,3 +919,272 @@ class AnnotationConvertAPI(generics.RetrieveAPIView):
         emit_webhooks_for_instance(organization, project, WebhookAction.ANNOTATIONS_DELETED, [pk])
         data = AnnotationDraftSerializer(instance=draft).data
         return Response(status=201, data=data)
+
+
+# TODO :new
+# Add new API endpoints for review pipeline
+
+class IsReviewer(IsAuthenticated):
+    """Permission class to check if user is a reviewer for the project"""
+    
+    def has_object_permission(self, request, view, obj):
+        """Check if user is a reviewer for the task's project"""
+        if not super().has_permission(request, view):
+            return False
+        
+        task = obj if isinstance(obj, Task) else obj.task
+        project = task.project
+        
+        try:
+            member = ProjectMember.objects.get(
+                user=request.user,
+                project=project,
+                enabled=True
+            )
+            return member.is_reviewer()
+        except ProjectMember.DoesNotExist:
+            return False
+
+
+class IsAnnotatorOwner(IsAuthenticated):
+    """Permission to check if user is the original annotator"""
+    
+    def has_object_permission(self, request, view, obj):
+        if not super().has_permission(request, view):
+            return False
+        
+        task = obj if isinstance(obj, Task) else obj.task
+        
+        # Check if user has any annotation on this task
+        return task.annotations.filter(completed_by=request.user).exists()
+
+
+class TaskReviewListAPI(generics.ListAPIView):
+    """List tasks pending review for the current user"""
+    
+    serializer_class = TaskReviewSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """Return reviews assigned to the current user"""
+        return TaskReview.objects.filter(
+            assigned_to=self.request.user,
+            review_status=TaskReview.ReviewStatus.PENDING
+        ).select_related('task', 'assigned_to', 'original_annotator')
+
+
+class TaskReviewDetailAPI(generics.RetrieveAPIView):
+    """Get details of a specific task review"""
+    
+    serializer_class = TaskReviewSerializer
+    queryset = TaskReview.objects.all()
+    permission_classes = [IsAuthenticated]
+    
+    def get_object(self):
+        """Override to get review by task_id instead of review id"""
+        task_id = self.kwargs.get('task_id')
+        review = TaskReview.objects.get(task_id=task_id)
+        self.check_object_permissions(self.request, review)
+        return review
+
+
+class TaskReviewAcceptAPI(generics.GenericAPIView):
+    """Accept a task review without modifications"""
+    
+    serializer_class = ReviewAcceptSerializer
+    permission_classes = [IsAuthenticated, IsReviewer]
+    
+    def get_object(self):
+        task_id = self.kwargs.get('task_id')
+        task = Task.objects.get(id=task_id)
+        self.check_object_permissions(self.request, task)
+        return task
+    
+    def post(self, request, *args, **kwargs):
+        """
+        Accept annotation review.
+        
+        Mark the task as finalized without any modifications.
+        """
+        task = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        with transaction.atomic():
+            # Update TaskReview
+            review = task.review
+            review.review_status = TaskReview.ReviewStatus.ACCEPTED
+            review.reviewed_at = now()
+            review.review_notes = serializer.validated_data.get('review_notes', '')
+            review.save(update_fields=['review_status', 'reviewed_at', 'review_notes'])
+            
+            # Trigger state transition to FINALIZED
+            context = TransitionContext(
+                entity=task,
+                user=request.user,
+                timestamp=now(),
+                metadata={'action': 'accept'},
+            )
+            StateManager.trigger_transition(task, 'task_finalized', context)
+            
+            # Update task metadata
+            if not task.metadata:
+                task.metadata = {}
+            task.metadata['reviewed_by'] = request.user.id
+            task.metadata['review_status'] = 'finalized'
+            task.save(update_fields=['metadata'])
+        
+        return Response(
+            TaskReviewSerializer(review).data,
+            status=status.HTTP_200_OK
+        )
+
+
+class TaskReviewModifyAPI(generics.GenericAPIView):
+    """Modify annotation and finalize review"""
+    
+    serializer_class = ReviewModifySerializer
+    permission_classes = [IsAuthenticated, IsReviewer]
+    
+    def get_object(self):
+        task_id = self.kwargs.get('task_id')
+        task = Task.objects.get(id=task_id)
+        self.check_object_permissions(self.request, task)
+        return task
+    
+    def post(self, request, *args, **kwargs):
+        """
+        Modify annotation and mark as finalized.
+        
+        Reviewer can overwrite the annotation result and finalize the task.
+        """
+        task = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        with transaction.atomic():
+            # Create a new annotation with reviewer's modifications
+            new_annotation = Annotation.objects.create(
+                task=task,
+                completed_by=request.user,
+                result=serializer.validated_data['result'],
+                lead_time=0,  # Reviewer modification doesn't have lead time
+                ground_truth=False,
+            )
+            
+            # Mark previous annotation as cancelled if needed
+            last_annotation = task.annotations.exclude(id=new_annotation.id).first()
+            if last_annotation:
+                last_annotation.was_cancelled = True
+                last_annotation.save(update_fields=['was_cancelled'])
+            
+            # Update TaskReview
+            review = task.review
+            review.review_status = TaskReview.ReviewStatus.MODIFIED_AND_ACCEPTED
+            review.reviewed_at = now()
+            review.review_notes = serializer.validated_data.get('review_notes', '')
+            review.save(update_fields=['review_status', 'reviewed_at', 'review_notes'])
+            
+            # Trigger state transition to FINALIZED
+            context = TransitionContext(
+                entity=task,
+                user=request.user,
+                timestamp=now(),
+                metadata={'action': 'modify_and_accept', 'annotation_id': new_annotation.id},
+            )
+            StateManager.trigger_transition(task, 'task_finalized', context)
+            
+            # Update task metadata
+            if not task.metadata:
+                task.metadata = {}
+            task.metadata['reviewed_by'] = request.user.id
+            task.metadata['review_status'] = 'finalized'
+            task.metadata['modified_annotation_id'] = new_annotation.id
+            task.save(update_fields=['metadata'])
+        
+        return Response(
+            TaskReviewSerializer(review).data,
+            status=status.HTTP_200_OK
+        )
+
+
+class TaskReviewRejectAPI(generics.GenericAPIView):
+    """Reject annotation and reassign to original annotator"""
+    
+    serializer_class = ReviewRejectSerializer
+    permission_classes = [IsAuthenticated, IsReviewer]
+    
+    def get_object(self):
+        task_id = self.kwargs.get('task_id')
+        task = Task.objects.get(id=task_id)
+        self.check_object_permissions(self.request, task)
+        return task
+    
+    def post(self, request, *args, **kwargs):
+        """
+        Reject annotation and reassign to original annotator.
+        
+        Resets task status to IN_PROGRESS and assigns back to the original
+        annotator with rejection reason in metadata.
+        """
+        task = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        with transaction.atomic():
+            # Get original annotator from review
+            review = task.review
+            original_annotator = review.original_annotator
+            
+            # Cancel all annotations
+            task.annotations.update(was_cancelled=True)
+            
+            # Update TaskReview
+            review.review_status = TaskReview.ReviewStatus.REJECTED
+            review.reviewed_at = now()
+            review.rejection_reason = serializer.validated_data['rejection_reason']
+            review.review_notes = serializer.validated_data.get('review_notes', '')
+            review.save(update_fields=[
+                'review_status',
+                'reviewed_at',
+                'rejection_reason',
+                'review_notes'
+            ])
+            
+            # Trigger state transition to REJECTED
+            context = TransitionContext(
+                entity=task,
+                user=request.user,
+                timestamp=now(),
+                metadata={
+                    'action': 'reject',
+                    'rejection_reason': review.rejection_reason,
+                    'original_annotator_id': original_annotator.id if original_annotator else None,
+                },
+            )
+            StateManager.trigger_transition(task, 'task_rejected', context)
+            
+            # Reset task to IN_PROGRESS for reassignment
+            context = TransitionContext(
+                entity=task,
+                user=request.user,
+                timestamp=now(),
+                metadata={'reason': 'reassigned_after_rejection'},
+            )
+            StateManager.trigger_transition(task, 'task_in_progress', context)
+            
+            # Update task metadata
+            if not task.metadata:
+                task.metadata = {}
+            task.metadata['rejection_reason'] = review.rejection_reason
+            task.metadata['rejected_by'] = request.user.id
+            task.metadata['rejected_at'] = now().isoformat()
+            task.metadata['review_status'] = 'rejected'
+            if original_annotator:
+                task.metadata['reassigned_to'] = original_annotator.id
+            task.save(update_fields=['metadata'])
+        
+        return Response(
+            TaskReviewSerializer(review).data,
+            status=status.HTTP_200_OK
+        )
