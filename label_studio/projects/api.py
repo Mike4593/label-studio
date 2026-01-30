@@ -30,7 +30,7 @@ from ml.serializers import MLBackendSerializer
 from projects.functions.next_task import get_next_task
 from projects.functions.stream_history import get_label_stream_history
 from projects.functions.utils import recalculate_created_annotations_and_labels_from_scratch
-from projects.models import Project, ProjectImport, ProjectManager, ProjectReimport, ProjectSummary
+from projects.models import Project, ProjectImport, ProjectManager, ProjectReimport, ProjectSummary, ProjectMember
 from projects.serializers import (
     GetFieldsSerializer,
     ProjectCountsSerializer,
@@ -64,6 +64,8 @@ from webhooks.models import WebhookAction
 from webhooks.utils import api_webhook, api_webhook_for_delete, emit_webhooks_for_instance
 
 from label_studio.core.utils.common import load_func
+
+from rest_framework.permissions import IsAuthenticated
 
 logger = logging.getLogger(__name__)
 
@@ -930,3 +932,121 @@ class ProjectAnnotatorsAPI(generics.RetrieveAPIView):
         users = User.objects.filter(id__in=annotator_ids).prefetch_related('om_through').order_by('id')
         data = UserSimpleSerializer(users, many=True, context={'request': request}).data
         return Response(data)
+
+# Add to projects/api.py
+# TODO : new
+
+class ProjectMemberRoleSerializer(serializers.ModelSerializer):
+    """Serializer for updating member roles"""
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    user_email = serializers.CharField(source='user.email', read_only=True)
+    user_name = serializers.CharField(source='user.get_full_name', read_only=True)
+    
+    class Meta:
+        model = ProjectMember
+        fields = [
+            'id',
+            'user_id',
+            'user_email',
+            'user_name',
+            'role',
+            'enabled',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'user_id', 'user_email', 'user_name', 'created_at', 'updated_at']
+
+
+class ProjectMembersListAPI(generics.ListAPIView):
+    """List project members with filtering by role"""
+    serializer_class = ProjectMemberRoleSerializer
+    permission_required = all_permissions.projects_view
+    
+    def get_queryset(self):
+        project_id = self.kwargs['project_id']
+        queryset = ProjectMember.objects.filter(
+            project_id=project_id,
+            enabled=True
+        ).select_related('user').order_by('-created_at')
+        
+        # Filter by role if provided
+        role = self.request.query_params.get('role')
+        if role in [ProjectMember.Role.ANNOTATOR, ProjectMember.Role.REVIEWER]:
+            queryset = queryset.filter(role=role)
+        
+        return queryset
+    
+    def get_object(self):
+        """Verify user has permission to view project members"""
+        project = Project.objects.get(id=self.kwargs['project_id'])
+        self.check_object_permissions(self.request, project)
+        return project
+
+
+@extend_schema(
+    parameters=[
+        OpenApiParameter(
+            name='project_id',
+            type=OpenApiTypes.INT,
+            location='path',
+            description='Project ID'
+        ),
+        OpenApiParameter(
+            name='member_id',
+            type=OpenApiTypes.INT,
+            location='path',
+            description='Member ID'
+        ),
+    ],
+    description='Update a project member\'s role (ANNOTATOR or REVIEWER)'
+)
+class ProjectMemberUpdateRoleAPI(generics.UpdateAPIView):
+    """Update a project member's role"""
+    serializer_class = ProjectMemberRoleSerializer
+    permission_required = all_permissions.projects_change
+    http_method_names = ['patch', 'put', 'head', 'options']
+    
+    def get_queryset(self):
+        project_id = self.kwargs['project_id']
+        return ProjectMember.objects.filter(project_id=project_id)
+    
+    def get_object(self):
+        member_id = self.kwargs['member_id']
+        member = ProjectMember.objects.get(id=member_id)
+        
+        # Verify project access
+        project = member.project
+        self.check_object_permissions(self.request, project)
+        
+        return member
+    
+    def perform_update(self, serializer):
+        """Update member role"""
+        member = serializer.save()
+        return member
+
+
+class ProjectMemberDeleteAPI(generics.DestroyAPIView):
+    """Remove a member from project"""
+    permission_required = all_permissions.projects_change
+    
+    def get_queryset(self):
+        project_id = self.kwargs['project_id']
+        return ProjectMember.objects.filter(project_id=project_id)
+    
+    def get_object(self):
+        member_id = self.kwargs['member_id']
+        member = ProjectMember.objects.get(id=member_id)
+        
+        # Verify project access
+        project = member.project
+        self.check_object_permissions(self.request, project)
+        
+        return member
+    
+    def destroy(self, request, *args, **kwargs):
+        """Mark member as disabled instead of deleting"""
+        member = self.get_object()
+        member.enabled = False
+        member.save(update_fields=['enabled'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
