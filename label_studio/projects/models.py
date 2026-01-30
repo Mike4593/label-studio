@@ -1381,17 +1381,63 @@ class LabelStreamHistory(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=['user', 'project'], name='unique_history')]
 
-
+# TDOD : OLD
 class ProjectMember(models.Model):
-
+    """Project member with role-based access control"""
+    
+    class Role(models.TextChoices):
+        """Role choices for project members"""
+        ANNOTATOR = 'ANNOTATOR', _('Annotator')
+        REVIEWER = 'REVIEWER', _('Reviewer')
+    
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='project_memberships', help_text='User ID'
+        settings.AUTH_USER_MODEL, 
+        on_delete=models.CASCADE, 
+        related_name='project_memberships', 
+        help_text='User ID'
     )
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='members', help_text='Project ID')
-    enabled = models.BooleanField(default=True, help_text='Project member is enabled')
-    created_at = models.DateTimeField(_('created at'), auto_now_add=True)
-    updated_at = models.DateTimeField(_('updated at'), auto_now=True)
+    project = models.ForeignKey(
+        Project, 
+        on_delete=models.CASCADE, 
+        related_name='members', 
+        help_text='Project ID'
+    )
+    role = models.CharField(
+        max_length=20,
+        choices=Role.choices,
+        default=Role.ANNOTATOR,
+        help_text='User role in the project (ANNOTATOR or REVIEWER)'
+    )
+    enabled = models.BooleanField(
+        default=True, 
+        help_text='Project member is enabled'
+    )
+    created_at = models.DateTimeField(
+        _('created at'), 
+        auto_now_add=True
+    )
+    updated_at = models.DateTimeField(
+        _('updated at'), 
+        auto_now=True
+    )
 
+    class Meta:
+        unique_together = [['user', 'project']]
+        verbose_name = 'Project Member'
+        verbose_name_plural = 'Project Members'
+        indexes = [
+            models.Index(fields=['project', 'role']),
+            models.Index(fields=['user', 'project']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.project.title} ({self.role})"
+
+    def is_annotator(self):
+        return self.role == self.Role.ANNOTATOR
+
+    def is_reviewer(self):
+        return self.role == self.Role.REVIEWER
 
 class ProjectSummary(models.Model):
 
