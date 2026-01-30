@@ -24,7 +24,7 @@ from rest_framework.fields import SkipField
 from rest_framework.serializers import ModelSerializer
 from rest_framework.settings import api_settings
 from tasks.exceptions import AnnotationDuplicateError
-from tasks.models import Annotation, AnnotationDraft, Prediction, PredictionMeta, Task
+from tasks.models import Annotation, AnnotationDraft, Prediction, PredictionMeta, Task, TaskReview
 from tasks.validation import TaskValidator
 from users.models import User
 from users.serializers import UserSerializer
@@ -907,3 +907,100 @@ class PredictionMetaSerializer(ModelSerializer):
 
 # LSE inherits this serializer
 TaskSerializerBulk = load_func(settings.TASK_SERIALIZER_BULK)
+
+
+
+# TODO
+# Add to serializers
+
+
+class TaskReviewSerializer(serializers.ModelSerializer):
+    """Serializer for task review operations"""
+    
+    reviewer_name = serializers.CharField(source='assigned_to.get_full_name', read_only=True)
+    annotator_name = serializers.CharField(source='original_annotator.get_full_name', read_only=True)
+    task_id = serializers.IntegerField(source='task.id', read_only=True)
+    
+    class Meta:
+        model = TaskReview
+        fields = [
+            'id',
+            'task_id',
+            'review_status',
+            'assigned_to',
+            'reviewer_name',
+            'original_annotator',
+            'annotator_name',
+            'submitted_at',
+            'reviewed_at',
+            'rejection_reason',
+            'review_notes',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'task_id',
+            'submitted_at',
+            'reviewed_at',
+            'created_at',
+            'updated_at',
+        ]
+
+
+class ReviewAcceptSerializer(serializers.Serializer):
+    """Serializer for accepting a review"""
+    
+    review_notes = serializers.CharField(
+        max_length=2000,
+        required=False,
+        allow_blank=True,
+        help_text='Optional notes from reviewer'
+    )
+
+    def validate(self, data):
+        if not data.get('review_notes'):
+            data['review_notes'] = ''
+        return data
+
+
+class ReviewModifySerializer(serializers.Serializer):
+    """Serializer for modifying annotation during review"""
+    
+    result = serializers.JSONField(
+        help_text='Modified annotation result'
+    )
+    
+    review_notes = serializers.CharField(
+        max_length=2000,
+        required=False,
+        allow_blank=True,
+        help_text='Notes explaining the modifications'
+    )
+
+    def validate_result(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Result must be a list of regions")
+        return value
+
+
+class ReviewRejectSerializer(serializers.Serializer):
+    """Serializer for rejecting a review"""
+    
+    rejection_reason = serializers.CharField(
+        max_length=2000,
+        required=True,
+        help_text='Reason for rejection'
+    )
+    
+    review_notes = serializers.CharField(
+        max_length=2000,
+        required=False,
+        allow_blank=True,
+        help_text='Additional notes for the annotator'
+    )
+
+    def validate_rejection_reason(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Rejection reason cannot be empty")
+        return value.strip()
